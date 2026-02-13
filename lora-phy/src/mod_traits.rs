@@ -1,3 +1,4 @@
+use defmt::Format;
 use embedded_hal_async::delay::DelayNs;
 
 use crate::mod_params::*;
@@ -21,7 +22,7 @@ pub trait InterfaceVariant {
 }
 
 /// Specifies an IRQ processing state to run the loop to
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Format)]
 pub enum IrqState {
     /// Runs the loop until after the preamble has been received
     PreambleReceived,

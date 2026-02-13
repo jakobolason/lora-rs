@@ -943,6 +943,8 @@ where
                         *detected = IrqMask::CADActivityDetected.is_set(irq_flags);
                     }
                     return Ok(Some(IrqState::Done));
+                } else {
+                    trace!("[ERROR] Irq mask CADDone is not set!");
                 }
             }
             RadioMode::Sleep | RadioMode::Standby | RadioMode::Listen => {
@@ -979,6 +981,13 @@ where
 
         if let (RadioMode::Receive(RxMode::Single(_)), Ok(Some(IrqState::Done))) = (radio_mode, &irq_state) {
             self.handle_implicit_header_mode().await?;
+        }
+        match &irq_state {
+            Ok(opt) => match opt {
+                Some(state) => trace!("state is {:?}", state),
+                None => trace!("STATE IS NONE"),
+            },
+            Err(e) => trace!("STATE IS IN ERROR: {:?}", e),
         }
 
         irq_state
