@@ -130,9 +130,12 @@ where
         Ok(())
     }
 
-    async fn rx_single(&mut self, buf: &mut [u8]) -> Result<RxStatus, Self::PhyError> {
+    async fn rx_single<F>(&mut self, buf: &mut [u8], on_preamble: F) -> Result<RxStatus, Self::PhyError>
+    where
+        F: FnMut(),
+    {
         if let Some(rx_params) = &self.rx_pkt_params {
-            match self.lora.rx(rx_params, buf).await {
+            match self.lora.rx(rx_params, buf, on_preamble).await {
                 Ok((len, q)) => Ok(RxStatus::Rx(len as usize, RxQuality::new(q.rssi, q.snr as i8))),
                 Err(RadioError::ReceiveTimeout) => Ok(RxStatus::RxTimeout),
                 Err(err) => Err(err.into()),
@@ -141,9 +144,16 @@ where
             Err(Error::NoRxParams)
         }
     }
-    async fn rx_continuous(&mut self, receiving_buffer: &mut [u8]) -> Result<(usize, RxQuality), Self::PhyError> {
+    async fn rx_continuous<F>(
+        &mut self,
+        receiving_buffer: &mut [u8],
+        on_preamble: F,
+    ) -> Result<(usize, RxQuality), Self::PhyError>
+    where
+        F: FnMut(),
+    {
         if let Some(rx_params) = &self.rx_pkt_params {
-            match self.lora.rx(rx_params, receiving_buffer).await {
+            match self.lora.rx(rx_params, receiving_buffer, on_preamble).await {
                 Ok((received_len, rx_pkt_status)) => {
                     Ok((
                         received_len as usize,

@@ -49,9 +49,10 @@ pub trait PhyRxTx: Sized {
     /// Receive data into the provided buffer with the given transceiver configuration. The returned
     /// future should only complete when RX data has been received. Furthermore, it should be
     /// possible to await the future again without settings up the receive config again.
-    async fn rx_continuous(
+    async fn rx_continuous<F>(
         &mut self,
         rx_buf: &mut [u8],
+        on_preample: F,
     ) -> Result<(usize, RxQuality), Self::PhyError>;
 
     /// Receive data into the provided buffer with the given transceiver configuration. The returned

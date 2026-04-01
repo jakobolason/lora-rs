@@ -289,16 +289,20 @@ where
     /// # Warning
     /// This function is not safe to drop or cancel, as it calls `process_irq_event`, which must run to completion to avoid radio lockups.
     /// Do not call this function within a select branch or in any context where it may be prematurely canceled.
-    pub async fn complete_rx(
+    pub async fn complete_rx<F>(
         &mut self,
         packet_params: &PacketParams,
         receiving_buffer: &mut [u8],
-    ) -> Result<(u8, PacketStatus), RadioError> {
+        mut on_preamble: F,
+    ) -> Result<(u8, PacketStatus), RadioError>
+    where
+        F: FnMut(),
+    {
         if let RadioMode::Receive(_) = self.radio_mode {
             loop {
                 match self.radio_kind.process_irq_event(self.radio_mode, None, true).await {
                     Ok(Some(actual_state)) => match actual_state {
-                        IrqState::PreambleReceived => (),
+                        IrqState::PreambleReceived => on_preamble(),
                         IrqState::Done => {
                             let received_len = self.radio_kind.get_rx_payload(packet_params, receiving_buffer).await?;
                             let rx_pkt_status = self.radio_kind.get_rx_packet_status().await?;
@@ -351,13 +355,17 @@ where
 
     /// Start reception and wait for its completion by calling
     /// [`LoRa::start_rx`]  and [`LoRa::complete_rx`] in succession.
-    pub async fn rx(
+    pub async fn rx<F>(
         &mut self,
         packet_params: &PacketParams,
         receiving_buffer: &mut [u8],
-    ) -> Result<(u8, PacketStatus), RadioError> {
+        on_preamble: F,
+    ) -> Result<(u8, PacketStatus), RadioError>
+    where
+        F: FnMut(),
+    {
         self.start_rx().await?;
-        self.complete_rx(packet_params, receiving_buffer).await
+        self.complete_rx(packet_params, receiving_buffer, on_preamble).await
     }
 
     /// Start listening to a given frequency and [`Bandwidth`]
