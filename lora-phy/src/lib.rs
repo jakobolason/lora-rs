@@ -293,7 +293,7 @@ where
         &mut self,
         packet_params: &PacketParams,
         receiving_buffer: &mut [u8],
-        mut on_preamble: F,
+        mut on_done: F,
     ) -> Result<(u8, PacketStatus), RadioError>
     where
         F: FnMut(),
@@ -302,8 +302,9 @@ where
             loop {
                 match self.radio_kind.process_irq_event(self.radio_mode, None, true).await {
                     Ok(Some(actual_state)) => match actual_state {
-                        IrqState::PreambleReceived => on_preamble(),
+                        IrqState::PreambleReceived => (),
                         IrqState::Done => {
+                            on_done();
                             let received_len = self.radio_kind.get_rx_payload(packet_params, receiving_buffer).await?;
                             let rx_pkt_status = self.radio_kind.get_rx_packet_status().await?;
                             return Ok((received_len, rx_pkt_status));
@@ -359,13 +360,13 @@ where
         &mut self,
         packet_params: &PacketParams,
         receiving_buffer: &mut [u8],
-        on_preamble: F,
+        on_done: F,
     ) -> Result<(u8, PacketStatus), RadioError>
     where
         F: FnMut(),
     {
         self.start_rx().await?;
-        self.complete_rx(packet_params, receiving_buffer, on_preamble).await
+        self.complete_rx(packet_params, receiving_buffer, on_done).await
     }
 
     /// Start listening to a given frequency and [`Bandwidth`]

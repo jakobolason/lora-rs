@@ -52,7 +52,7 @@ pub trait PhyRxTx: Sized {
     async fn rx_continuous<F>(
         &mut self,
         rx_buf: &mut [u8],
-        on_preample: F,
+        on_preamble: F,
     ) -> Result<(usize, RxQuality), Self::PhyError>;
 
     /// Receive data into the provided buffer with the given transceiver configuration. The returned
