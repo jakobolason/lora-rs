@@ -137,14 +137,8 @@ where
             .await?;
 
         if symbol_num > 0 {
-            let val = exp + (mant << 3);
-            let buf = [
-                OpCode::WriteRegister.value(),
-                Register::SynchTimeout.addr1(),
-                Register::SynchTimeout.addr2(),
-                val,
-            ];
-            self.intf.write(&buf, false).await?;
+            let timeout = exp + (mant << 3);
+            self.reg_w_8(Register::SynchTimeout, timeout).await?;
         }
         Ok(())
     }
@@ -180,36 +174,30 @@ where
             + (((steps_frac << SX126X_PLL_STEP_SHIFT_AMOUNT) + (SX126X_PLL_STEP_SCALED >> 1)) / SX126X_PLL_STEP_SCALED)
     }
 
-    async fn handle_implicit_header_mode(&mut self) -> Result<(), RadioError> {
-        // implicit header mode timeout behavior (see DS_SX1261-2_V1.2 datasheet chapter 15.3)
-        let register_and_clear = [
-            OpCode::WriteRegister.value(),
-            Register::RTCCtrl.addr1(),
-            Register::RTCCtrl.addr2(),
-            0x00u8,
-        ];
-        self.intf.write(&register_and_clear, false).await?;
-
-        let mut evt_clr = [0x00u8];
+    // SX162x WriteRegister wrapper for single u8 value writes
+    async fn reg_w_8(&mut self, reg: Register, value: u8) -> Result<(), RadioError> {
         self.intf
-            .read(
-                &[
-                    OpCode::ReadRegister.value(),
-                    Register::EvtClr.addr1(),
-                    Register::EvtClr.addr2(),
-                    0x00u8,
-                ],
-                &mut evt_clr,
-            )
+            .write(&[OpCode::WriteRegister.value(), reg.addr1(), reg.addr2(), value], false)
+            .await
+    }
+    // SX162x ReadRegister wrapper for single u8 value reads
+    async fn reg_r_8(&mut self, reg: Register) -> Result<u8, RadioError> {
+        let mut buf = [0u8];
+        self.intf
+            .read(&[OpCode::ReadRegister.value(), reg.addr1(), reg.addr2(), 0], &mut buf)
             .await?;
-        evt_clr[0] |= 1 << 1;
-        let register_and_evt_clear = [
-            OpCode::WriteRegister.value(),
-            Register::EvtClr.addr1(),
-            Register::EvtClr.addr2(),
-            evt_clr[0],
-        ];
-        self.intf.write(&register_and_evt_clear, false).await
+        Ok(buf[0])
+    }
+
+    // From 15.3 DS.SX1261-2.W.APP, Rev2.2 Dec 2024
+    // Implicit Header Mode Timeout Behavior
+    async fn handle_implicit_header_mode(&mut self) -> Result<(), RadioError> {
+        // Stop RTC counter
+        self.reg_w_8(Register::RTCCtrl, 0).await?;
+
+        // Read and clear potential event
+        let val = self.reg_r_8(Register::EvtClr).await?;
+        self.reg_w_8(Register::EvtClr, val | 1 << 1).await
     }
 }
 
@@ -278,10 +266,8 @@ where
             OpCode::WriteRegister.value(),
             Register::LoRaSyncword.addr1(),
             Register::LoRaSyncword.addr2(),
-            word[0],
-            word[1],
         ];
-        self.intf.write(&lora_syncword_set, false).await?;
+        self.intf.write_with_payload(&lora_syncword_set, &word, false).await?;
 
         self.set_tx_rx_buffer_base_address(0, 0).await?;
         // Update register list to support warm starts from sleep mode
@@ -456,27 +442,11 @@ where
                 const HIGH_POWER_MAX: i32 = 22;
                 // Clamp power between [-9, 22] dBm
                 let txp = output_power.clamp(HIGH_POWER_MIN, HIGH_POWER_MAX);
-                // Provide better resistance of the SX1262 Tx to antenna mismatch (see DS_SX1261-2_V1.2 datasheet chapter 15.2)
-                let mut tx_clamp_cfg = [0x00u8];
-                self.intf
-                    .read(
-                        &[
-                            OpCode::ReadRegister.value(),
-                            Register::TxClampCfg.addr1(),
-                            Register::TxClampCfg.addr2(),
-                            0x00u8,
-                        ],
-                        &mut tx_clamp_cfg,
-                    )
-                    .await?;
-                tx_clamp_cfg[0] |= 0x0F << 1;
-                let register_and_tx_clamp_cfg = [
-                    OpCode::WriteRegister.value(),
-                    Register::TxClampCfg.addr1(),
-                    Register::TxClampCfg.addr2(),
-                    tx_clamp_cfg[0],
-                ];
-                self.intf.write(&register_and_tx_clamp_cfg, false).await?;
+
+                // Provide better resistance of the SX1262 Tx to antenna mismatch
+                // Bits 4-1 must be set to `1111`
+                let tx_clamp_val = self.reg_r_8(Register::TxClampCfg).await?;
+                self.reg_w_8(Register::TxClampCfg, tx_clamp_val | 0b11110).await?;
 
                 // From Table 13-21: PA Operating Modes with Optimal Settings
                 match txp {
@@ -528,35 +498,17 @@ where
         ];
         self.intf.write(&op_code_and_mod_params, false).await?;
 
-        // Handle modulation quality with the 500 kHz LoRa bandwidth (see DS_SX1261-2_V1.2 datasheet chapter 15.1)
-        let mut tx_mod = [0x00u8];
-        self.intf
-            .read(
-                &[
-                    OpCode::ReadRegister.value(),
-                    Register::TxModulation.addr1(),
-                    Register::TxModulation.addr2(),
-                    0x00u8,
-                ],
-                &mut tx_mod,
-            )
-            .await?;
+        // From 15.1 DS.SX1261-2.W.APP, Rev2.2 Dec 2024
+        // Modulation Quality with 500kHz LoRa Bandwidth
+        //
+        // Before any packet transmission, bit #2 at address 0x0889 shall be set to:
+        // * 0 if the LoRa BW = 500kHz
+        // * 1 for any other LoRa BW or any (G)FSK configuration
+        let mod_val = self.reg_r_8(Register::TxModulation).await?;
         if mdltn_params.bandwidth == Bandwidth::_500KHz {
-            let register_and_tx_mod_update = [
-                OpCode::WriteRegister.value(),
-                Register::TxModulation.addr1(),
-                Register::TxModulation.addr2(),
-                tx_mod[0] & (!(1 << 2)),
-            ];
-            self.intf.write(&register_and_tx_mod_update, false).await
+            self.reg_w_8(Register::TxModulation, mod_val & 0xfb).await
         } else {
-            let register_and_tx_mod_update = [
-                OpCode::WriteRegister.value(),
-                Register::TxModulation.addr1(),
-                Register::TxModulation.addr2(),
-                tx_mod[0] | (1 << 2),
-            ];
-            self.intf.write(&register_and_tx_mod_update, false).await
+            self.reg_w_8(Register::TxModulation, mod_val | 0b100).await
         }
     }
 
@@ -572,34 +524,17 @@ where
         ];
         self.intf.write(&op_code_and_pkt_params, false).await?;
 
-        // Optimize Inverted IQ Operation, otherwise packet loss with longer packets might occur.
-        let mut iq_polarity = [0x00u8];
-        self.intf
-            .read(
-                &[
-                    OpCode::ReadRegister.value(),
-                    Register::IQPolarity.addr1(),
-                    Register::IQPolarity.addr2(),
-                    0x00u8,
-                ],
-                &mut iq_polarity,
-            )
-            .await?;
-
-        let reg = if pkt_params.iq_inverted {
-            iq_polarity[0] & (!(1 << 2))
+        // From 15.4 DS.SX1261-2.W.APP, Rev2.2 Dec 2024
+        // Optimizing the Inverted IQ Operation
+        //
+        // When exchanging LoRa packets with inverted IQ polarity,
+        // some packet losses may be observed for longer packets.
+        let val = self.reg_r_8(Register::IQPolarity).await?;
+        if pkt_params.iq_inverted {
+            self.reg_w_8(Register::IQPolarity, val & 0xfb).await
         } else {
-            iq_polarity[0] | (1 << 2)
-        };
-
-        let op = [
-            OpCode::WriteRegister.value(),
-            Register::IQPolarity.addr1(),
-            Register::IQPolarity.addr2(),
-            reg,
-        ];
-        self.intf.write(&op, false).await?;
-        Ok(())
+            self.reg_w_8(Register::IQPolarity, val | 0b100).await
+        }
     }
 
     // Calibrate the image rejection based on the given frequency
@@ -671,14 +606,8 @@ where
         };
         self.set_lora_symbol_num_timeout(num_symbols).await?;
 
-        let rx_gain = if self.config.rx_boost { 0x96 } else { 0x94 };
-        let register_and_rx_gain = [
-            OpCode::WriteRegister.value(),
-            Register::RxGain.addr1(),
-            Register::RxGain.addr2(),
-            rx_gain,
-        ];
-        self.intf.write(&register_and_rx_gain, false).await?;
+        let val = if self.config.rx_boost { 0x96 } else { 0x94 };
+        self.reg_w_8(Register::RxGain, val).await?;
 
         match rx_mode {
             RxMode::DutyCycle(args) => {
@@ -719,47 +648,35 @@ where
         rx_pkt_params: &PacketParams,
         receiving_buffer: &mut [u8],
     ) -> Result<u8, RadioError> {
-        let op_code = [OpCode::GetRxBufferStatus.value()];
-        let mut rx_buffer_status = [0x00u8; 2];
-        let read_status = self.intf.read_with_status(&op_code, &mut rx_buffer_status).await?;
-        if OpStatusErrorMask::is_error(read_status) {
-            return Err(RadioError::OpError(read_status));
-        }
+        let (rx_len, offset) = {
+            let mut buf = [0x00u8; 2];
+            let op_code = [OpCode::GetRxBufferStatus.value()];
+            let status = self.intf.read_with_status(&op_code, &mut buf).await?;
+            if OpStatusErrorMask::is_error(status) {
+                return Err(RadioError::OpError(status));
+            }
+            (buf[0], buf[1])
+        };
 
-        let mut payload_length_buffer = [0x00u8];
-        if rx_pkt_params.implicit_header {
-            self.intf
-                .read(
-                    &[
-                        OpCode::ReadRegister.value(),
-                        Register::PayloadLength.addr1(),
-                        Register::PayloadLength.addr2(),
-                        0x00u8,
-                    ],
-                    &mut payload_length_buffer,
-                )
-                .await?;
+        let payload_length = if rx_pkt_params.implicit_header {
+            self.reg_r_8(Register::PayloadLength).await?
         } else {
-            payload_length_buffer[0] = rx_buffer_status[0];
-        }
-
-        let payload_length = payload_length_buffer[0];
-        let offset = rx_buffer_status[1];
+            rx_len
+        };
 
         if (payload_length as usize) > receiving_buffer.len() {
-            Err(RadioError::PayloadSizeMismatch(
+            return Err(RadioError::PayloadSizeMismatch(
                 payload_length as usize,
                 receiving_buffer.len(),
-            ))
-        } else {
-            self.intf
-                .read(
-                    &[OpCode::ReadBuffer.value(), offset, 0x00u8],
-                    &mut receiving_buffer[..payload_length as usize],
-                )
-                .await?;
-            Ok(payload_length)
+            ));
         }
+        self.intf
+            .read(
+                &[OpCode::ReadBuffer.value(), offset, 0x00u8],
+                &mut receiving_buffer[..payload_length as usize],
+            )
+            .await?;
+        Ok(payload_length)
     }
 
     async fn get_rx_packet_status(&mut self) -> Result<PacketStatus, RadioError> {
@@ -797,13 +714,7 @@ where
             rx_gain_final = 0x96u8;
         }
 
-        let register_and_rx_gain = [
-            OpCode::WriteRegister.value(),
-            Register::RxGain.addr1(),
-            Register::RxGain.addr2(),
-            rx_gain_final,
-        ];
-        self.intf.write(&register_and_rx_gain, false).await?;
+        self.reg_w_8(Register::RxGain, rx_gain_final).await?;
 
         // See:
         //  https://lora-developers.semtech.com/documentation/tech-papers-and-guides/channel-activity-detection-ensuring-your-lora-packets-are-sent/how-to-ensure-your-lora-packets-are-sent-properly
